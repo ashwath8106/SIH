@@ -1,4 +1,3 @@
-
 import logging
 import sqlite3
 from datetime import datetime, date
@@ -102,29 +101,43 @@ def calculate_water_amount(soil_moisture, area, soil_depth, predicted_rainfall, 
         water_deficit_mm *= 0.9
     return max(0, int(round(water_deficit_mm * area)))
 
+# ---------------- API ENDPOINTS ----------------
+
 @app.route('/api/watering_decision', methods=['GET'])
 def watering_decision():
-    lang = request.args.get('lang', 'en')
     sensor = get_sensor_data()
     soil = sensor['soil_moisture']
     humidity = sensor['humidity']
+    temperature = sensor['temperature']
+
     conn = connect_db()
     row = conn.execute("SELECT crop, sow_date, area, soil_depth FROM fields LIMIT 1").fetchone()
     conn.close()
+    
     crop = row['crop'] if row else 'banana'
     sow_date = row['sow_date'] if row else str(date.today())
     sow_date = datetime.strptime(sow_date, '%Y-%m-%d').date() if isinstance(sow_date, str) else sow_date
     area = row['area'] if row else 10
     soil_depth = row['soil_depth'] if row else 0.2
+    
     lat, lon = 27.2, 88.03
     weather = get_daily_weather_forecast(lat, lon)
     et0 = get_et0_from_openmeteo(lat, lon)
     kc, stage_name, days_elapsed = calculate_dynamic_kc_for_crop(crop, sow_date)
     predicted_rain = float(weather.get('precipitation_sum', [0, 0])[1])
+    
     water_amount = calculate_water_amount(soil, area, soil_depth, predicted_rain, et0, kc, humidity)
+    
     result = {
-        'crop': crop, 'stage': stage_name, 'kc': kc, 'et0': et0, 'soil_moisture': soil,
-        'humidity': humidity, 'rain_forecast': predicted_rain, 'water_amount_liters': water_amount
+        'crop': crop,
+        'stage': stage_name,
+        'kc': kc,
+        'et0': et0,
+        'soil_moisture': soil,
+        'temperature': temperature,      # ✅ Include temperature
+        'humidity': humidity,
+        'rain_forecast': predicted_rain,
+        'water_amount_liters': water_amount
     }
     return jsonify(result)
 
@@ -144,6 +157,8 @@ def receive_sensor_data():
     conn.commit()
     conn.close()
     return jsonify({'status': 'success'}), 200
+
+# ---------------- DASHBOARD ----------------
 
 INDEX_HTML = """
 <!doctype html>
