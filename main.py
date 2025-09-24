@@ -1,4 +1,3 @@
-# smart_irrigation_app.py
 import logging
 import sqlite3
 from datetime import datetime, date
@@ -9,13 +8,76 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 DB_PATH = 'plant_watering.db'
 
-# ------------------- DB Connection -------------------
+# --------------------------- CROP PROFILES ---------------------------
+CROP_PROFILES = {
+    'banana': {
+        'display': 'Banana',
+        'stages': [
+            {'name': 'Initial', 'days': 30, 'kc': 0.6},
+            {'name': 'Development', 'days': 90, 'kc': 0.9},
+            {'name': 'Mid-Season', 'days': 150, 'kc': 1.05},
+            {'name': 'Late-Season', 'days': 60, 'kc': 0.8},
+        ]
+    },
+    'paddy': {
+        'display': 'Paddy (Rice)',
+        'stages': [
+            {'name': 'Initial', 'days': 25, 'kc': 0.7},
+            {'name': 'Development', 'days': 35, 'kc': 1.05},
+            {'name': 'Mid-Season', 'days': 50, 'kc': 1.2},
+            {'name': 'Late-Season', 'days': 30, 'kc': 0.9},
+        ]
+    },
+    'maize': {
+        'display': 'Maize',
+        'stages': [
+            {'name': 'Initial', 'days': 20, 'kc': 0.45},
+            {'name': 'Development', 'days': 40, 'kc': 0.85},
+            {'name': 'Mid-Season', 'days': 45, 'kc': 1.15},
+            {'name': 'Late-Season', 'days': 25, 'kc': 0.8},
+        ]
+    },
+    'potato': {
+        'display': 'Potato',
+        'stages': [
+            {'name': 'Initial', 'days': 15, 'kc': 0.7},
+            {'name': 'Development', 'days': 45, 'kc': 1.05},
+            {'name': 'Mid-Season', 'days': 30, 'kc': 1.0},
+            {'name': 'Late-Season', 'days': 20, 'kc': 0.8},
+        ]
+    },
+    'cardamom': {
+        'display': 'Cardamom',
+        'stages': [
+            {'name': 'Initial', 'days': 30, 'kc': 0.6},
+            {'name': 'Development', 'days': 60, 'kc': 0.85},
+            {'name': 'Mid-Season', 'days': 120, 'kc': 1.0},
+            {'name': 'Late-Season', 'days': 60, 'kc': 0.85},
+        ]
+    }
+}
+
+# --------------------------- MULTILINGUAL ---------------------------
+TRANSLATIONS = {
+    'en': {'title': 'Smart Irrigation Dashboard', 'choose_crop': 'Choose Crop', 'sow_date': 'Sowing Date',
+           'submit': 'Submit', 'lang': 'Language'},
+    'hi': {'title': 'स्मार्ट सिंचाई डैशबोर्ड', 'choose_crop': 'फसल चुनें', 'sow_date': 'बुवाई की तारीख',
+           'submit': 'जमा करें', 'lang': 'भाषा'},
+    'si': {'title': 'Smart Irrigation Dashboard (Sikkimese)', 'choose_crop': 'Crop चुन्नुहोस्',
+           'sow_date': 'रोपाइ मिति', 'submit': 'पेश गर्नुहोस्', 'lang': 'भाषा'},
+    'ta': {'title': 'அறிவார்ந்த நீர்ப்பாசன கட்டுப்பாடு', 'choose_crop': 'பயிர் தேர்ந்தெடுக்கவும்',
+           'sow_date': 'விதைத்த தேதி', 'submit': 'சமர்ப்பி', 'lang': 'மொழி'}
+}
+
+def t(key, lang='en'):
+    return TRANSLATIONS.get(lang, TRANSLATIONS['en']).get(key, key)
+
+# --------------------------- DB SETUP ---------------------------
 def connect_db():
     conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
     conn.row_factory = sqlite3.Row
     return conn
 
-# ------------------ Initialize DB --------------------
 def init_db():
     conn = connect_db()
     c = conn.cursor()
@@ -49,168 +111,125 @@ def init_db():
 
 init_db()
 
-# ------------------- Static Data -------------------
-# Crops and Translations skipped here for brevity
-# Make sure you keep all previous CROP_PROFILES and TRANSLATIONS blocks
-# Helper functions like `calculate_dynamic_kc_for_crop`, `get_et0_from_openmeteo`, etc. also unchanged
-# So do NOT delete them from your script
+# ------------------------ HELPER FUNCTIONS ------------------------
+def calculate_dynamic_kc_for_crop(crop_key, sow_date, current_date=None):
+    if crop_key not in CROP_PROFILES:
+        crop_key = 'maize'
+    if current_date is None:
+        current_date = datetime.now().date()
+    days_elapsed = (current_date - sow_date).days
+    if days_elapsed < 0:
+        days_elapsed = 0
+    profile = CROP_PROFILES[crop_key]
+    cumulative = 0
+    for stage in profile['stages']:
+        cumulative += stage['days']
+        if days_elapsed <= cumulative:
+            return stage['kc'], stage['name'], days_elapsed
+    last = profile['stages'][-1]
+    return last['kc'], last['name'], days_elapsed
 
-# ------------------------- Watering Decision Route -------------------------
+def get_et0_from_openmeteo(latitude, longitude):
+    try:
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&hourly=et0_fao_evapotranspiration&timezone=auto"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        return float(data['hourly']['et0_fao_evapotranspiration'][0])
+    except Exception:
+        return 3.0
+
+def get_daily_weather_forecast(latitude, longitude):
+    try:
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&daily=precipitation_sum,temperature_2m_max&timezone=auto"
+        response = requests.get(url, timeout=5)
+        return response.json().get('daily', {})
+    except Exception:
+        return {}
+
+def get_sensor_data():
+    conn = connect_db()
+    row = conn.execute('SELECT soil_moisture, temperature, humidity, timestamp FROM sensors ORDER BY timestamp DESC LIMIT 1').fetchone()
+    conn.close()
+    return dict(row) if row else {'soil_moisture': 0, 'temperature': 0, 'humidity': 0, 'timestamp': None}
+
+def get_latest_tank_level():
+    conn = connect_db()
+    row = conn.execute('SELECT level_percent, timestamp FROM tank_levels ORDER BY timestamp DESC LIMIT 1').fetchone()
+    conn.close()
+    return dict(row) if row else {'level_percent': None, 'timestamp': None}
+
+def calculate_water_amount(soil_moisture, area, soil_depth, predicted_rainfall, et0, kc, humidity, field_capacity=30):
+    etc = et0 * kc
+    soil_depth_mm = soil_depth * 1000
+    current_moisture_mm = (soil_moisture / 100.0) * soil_depth_mm
+    water_deficit_mm = max(0.0, etc - current_moisture_mm / area - predicted_rainfall)
+    if humidity < 30:
+        water_deficit_mm *= 1.2
+    elif humidity > 80:
+        water_deficit_mm *= 0.9
+    return max(0, int(round(water_deficit_mm * area)))
+
+# ------------------------- ROUTES -------------------------
 @app.route('/api/watering_decision', methods=['GET'])
 def watering_decision():
     lang = request.args.get('lang', 'en')
     sensor = get_sensor_data()
-    if sensor['timestamp'] is None:
-        return jsonify({'error': 'No sensor data available'}), 404
-
-    soil = float(sensor['soil_moisture'])
-    humidity = float(sensor['humidity'])
+    soil = sensor['soil_moisture']
+    humidity = sensor['humidity']
 
     conn = connect_db()
-    c = conn.cursor()
-    c.execute("SELECT crop, sow_date, area, soil_depth FROM fields LIMIT 1")
-    row = c.fetchone()
+    row = conn.execute("SELECT crop, sow_date, area, soil_depth FROM fields LIMIT 1").fetchone()
     conn.close()
 
-    if row:
-        crop = row['crop']
-        sow_date = datetime.strptime(row['sow_date'], '%Y-%m-%d').date() if isinstance(row['sow_date'], str) else row['sow_date']
-        area = float(row['area'])
-        soil_depth = float(row['soil_depth'])
-    else:
-        crop = 'banana'
-        sow_date = date.today()
-        area = 10
-        soil_depth = 0.2
+    crop = row['crop'] if row else 'banana'
+    sow_date = row['sow_date'] if row else str(date.today())
+    sow_date = datetime.strptime(sow_date, '%Y-%m-%d').date() if isinstance(sow_date, str) else sow_date
+    area = row['area'] if row else 10
+    soil_depth = row['soil_depth'] if row else 0.2
 
-    latitude = float(request.args.get('lat', 27.2))
-    longitude = float(request.args.get('lon', 88.03))
-    daily_forecast = get_daily_weather_forecast(latitude, longitude)
-    et0 = get_et0_from_openmeteo(latitude, longitude) or 3.0
+    lat, lon = 27.2, 88.03
+    weather = get_daily_weather_forecast(lat, lon)
+    et0 = get_et0_from_openmeteo(lat, lon)
     kc, stage_name, days_elapsed = calculate_dynamic_kc_for_crop(crop, sow_date)
 
-    predicted_rain = 0.0
-    if daily_forecast and len(daily_forecast.get('precipitation', [])) >= 2:
-        predicted_rain = float(daily_forecast['precipitation'][1] or 0.0)
-
-    moisture_threshold = 30.0
-    critical_moisture = 10.0
-    decision_text = ""
-    if soil >= moisture_threshold:
-        decision_text = "No watering needed; soil moisture sufficient."
-    else:
-        today_prec = daily_forecast['precipitation'][0] if daily_forecast and daily_forecast.get('precipitation') else 0.0
-        tomorrow_prec = predicted_rain
-        if today_prec > 0.3:
-            decision_text = "No watering needed; rain expected today."
-        elif tomorrow_prec > 0.3 and soil >= critical_moisture:
-            decision_text = "No watering needed; rain expected tomorrow and soil not critically low."
-        elif soil < critical_moisture and tomorrow_prec > 0.3:
-            decision_text = "Minimal watering recommended; soil critically low but rain tomorrow."
-        else:
-            if humidity < 30:
-                decision_text = "Watering needed; low humidity and no rain expected."
-            else:
-                pass  # proceed to compute water amount
-
+    predicted_rain = float(weather.get('precipitation_sum', [0, 0])[1])
     water_amount = calculate_water_amount(soil, area, soil_depth, predicted_rain, et0, kc, humidity)
-
-    if "No watering needed" in decision_text and water_amount > 0:
-        decision_text = f"Warning: water deficit detected, {water_amount} liters needed."
-
-    conn = connect_db()
-    c = conn.cursor()
-    c.execute("INSERT INTO decisions (decision, water_amount) VALUES (?, ?)", (decision_text, int(water_amount)))
-    conn.commit()
-    conn.close()
-
-    tank = get_latest_tank_level()
-    tank_level = tank['level_percent'] if tank['level_percent'] is not None else 0
-
-    condition = "Good"
-    if soil < critical_moisture:
-        condition = "Poor - critically low moisture"
-    elif soil < moisture_threshold:
-        condition = "Fair - moisture below threshold"
-
-    temp_warn = None
-    if daily_forecast and len(daily_forecast.get('max_temperatures', [])) >= 2:
-        t0 = daily_forecast['max_temperatures'][0]
-        t1 = daily_forecast['max_temperatures'][1]
-        if t1 > t0 + 4:
-            temp_warn = "High temperature spike expected tomorrow."
 
     result = {
         'crop': crop,
-        'crop_display': CROP_PROFILES.get(crop, {}).get('display', crop),
-        'sow_date': str(sow_date),
-        'days_elapsed': days_elapsed,
         'stage': stage_name,
         'kc': kc,
-        'et0_mm_per_day': et0,
+        'et0': et0,
         'soil_moisture': soil,
         'humidity': humidity,
-        'predicted_rain_tomorrow_mm': predicted_rain,
-        'watering_decision': decision_text,
-        'water_amount_liters': int(water_amount),
-        'tank_level_percent': tank_level,
-        'field_condition': condition,
-        'temperature_warning': temp_warn
+        'rain_forecast': predicted_rain,
+        'water_amount_liters': water_amount
     }
 
-    result_localized = {
-        'title': t('title', lang),
-        'watering_decision_label': t('watering_decision', lang),
-        'water_amount_label': t('water_amount', lang),
-        'field_condition_label': t('field_condition', lang),
-        'latest_sensor_label': t('latest_sensor', lang),
-        'sensor': sensor,
-        'tank': tank,
-        'result': result
-    }
+    return jsonify(result)
 
-    return jsonify(result_localized), 200
-
-# ------------------- UI Dashboard (Homepage) -------------------
 INDEX_HTML = """
 <!doctype html>
 <html>
-  <head>
-    <title>{{ t('title') }}</title>
-    <script>
-      function changeLang() {
-        const lang = document.getElementById('lang').value;
-        window.location.href = '/?lang=' + lang;
-      }
-    </script>
-  </head>
+  <head><title>{{ t('title') }}</title></head>
   <body>
     <h1>{{ t('title') }}</h1>
-    <form method="post" action="{{ url_for('set_field') }}">
+    <form method="post">
       <label>{{ t('choose_crop') }}:
         <select name="crop">
           {% for key, profile in crops.items() %}
             <option value="{{ key }}" {% if current_crop == key %}selected{% endif %}>{{ profile.display }}</option>
           {% endfor %}
-        </select>
-      </label><br/>
-      <label>{{ t('sow_date') }}:
-        <input type="date" name="sow_date" value="{{ sow_date }}">
-      </label><br/>
-      <label>Area (m²):
-        <input name="area" type="number" value="{{ area }}" step="0.1">
-      </label><br/>
-      <label>Soil depth (m):
-        <input name="soil_depth" type="number" value="{{ soil_depth }}" step="0.01">
-      </label><br/>
+        </select></label><br/>
+      <label>{{ t('sow_date') }}: <input type="date" name="sow_date" value="{{ sow_date }}"></label><br/>
+      <label>Area (m²): <input name="area" type="number" step="0.1" value="{{ area }}"></label><br/>
+      <label>Soil Depth (m): <input name="soil_depth" type="number" step="0.01" value="{{ soil_depth }}"></label><br/>
       <label>{{ t('lang') }}:
-        <select id="lang" onchange="changeLang()">
-          <option value="en" {% if lang == 'en' %}selected{% endif %}>English</option>
-          <option value="hi" {% if lang == 'hi' %}selected{% endif %}>हिन्दी</option>
-          <option value="si" {% if lang == 'si' %}selected{% endif %}>Sikkimese</option>
-          <option value="ta" {% if lang == 'ta' %}selected{% endif %}>தமிழ்</option>
-        </select>
-      </label><br/>
+        <select name="lang">
+          {% for code in ['en','hi','si','ta'] %}
+            <option value="{{code}}" {% if lang==code %}selected{% endif %}>{{ code }}</option>
+          {% endfor %}
+        </select></label><br/>
       <button type="submit">{{ t('submit') }}</button>
     </form>
   </body>
@@ -219,47 +238,19 @@ INDEX_HTML = """
 
 @app.route('/', methods=['GET', 'POST'])
 def set_field():
-    lang = request.args.get('lang', 'en')
+    lang = request.form.get('lang', request.args.get('lang', 'en'))
     conn = connect_db()
-    c = conn.cursor()
-    c.execute("SELECT crop, sow_date, area, soil_depth FROM fields LIMIT 1")
-    row = c.fetchone()
-    conn.close()
-
+    row = conn.execute("SELECT crop, sow_date, area, soil_depth FROM fields LIMIT 1").fetchone()
     crop = row['crop'] if row else 'banana'
     sow_date = row['sow_date'] if row else str(date.today())
     area = row['area'] if row else 10
     soil_depth = row['soil_depth'] if row else 0.2
 
     if request.method == 'POST':
-        crop = request.form.get('crop', crop)
-        sow_date = request.form.get('sow_date', sow_date)
-        area = float(request.form.get('area', area))
-        soil_depth = float(request.form.get('soil_depth', soil_depth))
+        crop = request.form['crop']
+        sow_date = request.form['sow_date']
+        area = float(request.form['area'])
+        soil_depth = float(request.form['soil_depth'])
 
         conn = connect_db()
-        c = conn.cursor()
-        c.execute("SELECT id FROM fields LIMIT 1")
-        exists = c.fetchone()
-        if exists:
-            c.execute("UPDATE fields SET crop=?, sow_date=?, area=?, soil_depth=? WHERE id=?",
-                      (crop, sow_date, area, soil_depth, exists['id']))
-        else:
-            c.execute("INSERT INTO fields (crop, sow_date, area, soil_depth) VALUES (?, ?, ?, ?)",
-                      (crop, sow_date, area, soil_depth))
-        conn.commit()
-        conn.close()
-        return redirect(url_for('set_field', lang=lang))
-
-    return render_template_string(INDEX_HTML,
-                                  t=lambda key: t(key, lang),
-                                  crops=CROP_PROFILES,
-                                  current_crop=crop,
-                                  sow_date=sow_date,
-                                  area=area,
-                                  soil_depth=soil_depth,
-                                  lang=lang)
-
-# ------------------- Run Flask (only local) -------------------
-if __name__ == '__main__':
-    app.run(debug=True)
+        exists = conn.e
